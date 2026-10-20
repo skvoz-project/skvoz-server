@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "component": "skvoz-network",
+  "version": "0.7.0",
+  "target": "x86_64-unknown-linux-gnu",
+  "profile": "linux-gnu-bookworm",
+  "tuple": {
+    "api": 1,
+    "network": 6,
+    "core": "5.0.0",
+    "helper": "0.6.0",
+    "core_abi": 1,
+    "network_abi": 1
+  },
+  "artifact": {
+    "url": "https://github.com/skvoz-project/skvoz-network/releases/download/network-v0.7.0-675aeff79f922b10a6ae6defe463b674ce15ece4/skvoz-network-0.7.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "5fffc5b5ca5c7992dfe0a612ae941d17e0c8c2e469f41f8149c74ff9f9ce1e32"
+  }
+}

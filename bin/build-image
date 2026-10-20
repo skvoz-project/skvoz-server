@@ -1,0 +1,22 @@
+#!/bin/sh
+# Build one owning Server target using an already capped, reviewed BuildKit daemon.
+set -eu
+[ "$#" -eq 2 ] || { echo 'Usage: build-image ruby-tests|tests|deploy IMAGE_TAG' >&2; exit 1; }
+case "$1" in ruby-tests|tests|deploy) ;; *) echo 'Invalid Server target' >&2; exit 1;; esac
+case "$2" in ''|*[!a-zA-Z0-9_.:/-]*) echo 'Invalid image tag' >&2; exit 1;; esac
+: "${SKVOZ_BUILDKIT_CONTAINER:?A prepared capped BuildKit container is required}"
+: "${SKVOZ_BUILD_OUTPUT:?Its owning host output directory is required}"
+revision=${SOURCE_REVISION:-}
+case "$revision" in *[!0-9a-f]*) echo 'Invalid owning source revision' >&2; exit 1;; esac
+[ -z "$revision" ] || [ "${#revision}" -eq 40 ] || { echo 'Invalid owning source revision' >&2; exit 1; }
+builder=$(timeout --kill-after=2s 10s docker container inspect --format '{{.Id}} {{.Config.Image}} {{.State.Running}}' "$SKVOZ_BUILDKIT_CONTAINER")
+set -- "$1" "$2" $builder
+[ "$#" -eq 5 ] && [ "$4" = 'moby/buildkit@sha256:a82d1ab899cda51aade6fe818d71e4b58c4079e047a0cf29dbb93b2b0465ea69' ] && [ "$5" = true ] || { echo 'Prepared BuildKit identity differs' >&2; exit 1; }
+# The caller owns daemon/RUN ancestry, caps, absolute deadline, guard and cleanup.
+timeout --kill-after=5s 1800s docker exec "$3" buildctl --wait build \
+  --frontend dockerfile.v0 --local context=/context --local dockerfile=/context \
+  --opt "target=$1" --opt "build-arg:SOURCE_REVISION=$revision" \
+  --output "type=docker,name=$2,dest=/output/$1.tar"
+archive=$SKVOZ_BUILD_OUTPUT/$1.tar
+[ -f "$archive" ] && [ ! -L "$archive" ] || { echo 'Owned image output missing' >&2; exit 1; }
+timeout --kill-after=5s 120s docker image load --input "$archive"

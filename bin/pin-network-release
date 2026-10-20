@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+require 'bundler/setup'
+require 'tmpdir'
+require_relative 'support/network_download'
+abort 'Usage: pin-network-release EXACT-TAG [LOCK]' unless ARGV.size.between?(1, 2)
+begin
+  tag = ARGV.fetch(0)
+  raise ArgumentError, 'Invalid exact Network release tag' unless tag.match?(/\Anetwork-v0\.7\.0-[0-9a-f]{40}\z/)
+  lock_path = ARGV[1] ? File.expand_path(ARGV[1]) : File.expand_path('../product-native-lock.json', __dir__)
+  current = NetworkDownload.lock(lock_path)
+  asset = 'skvoz-network-0.7.0-x86_64-unknown-linux-gnu.tar.gz'
+  base = "https://github.com/skvoz-project/skvoz-network/releases/download/#{tag}/"
+  Dir.mktmpdir('.skvoz-network-pin-', File.dirname(lock_path)) do |temporary|
+    sums_path = NetworkDownload.fetch(base + 'SHA256SUMS', File.join(temporary, 'SHA256SUMS'), limit: 65_536)
+    sums = {}
+    File.foreach(sums_path) do |line|
+      match = /\A([0-9a-f]{64})  ([a-zA-Z0-9_.-]+)\n?\z/.match(line)
+      raise ArgumentError, 'Invalid Network release checksum inventory' unless match && !sums.key?(match[2])
+      sums[match[2]] = match[1]
+    end
+    candidate = current.merge('artifact' => { 'url' => base + asset, 'sha256' => sums.fetch(asset) })
+    candidate_path = File.join(temporary, 'lock.json')
+    File.write(candidate_path, JSON.pretty_generate(candidate) + "\n", mode: 'wx', perm: 0o600)
+    # Verify the downloaded archive and required product files before changing the pin.
+    ok = system(RbConfig.ruby, File.expand_path('install-native', __dir__), candidate_path, File.join(temporary, 'verified'))
+    raise IOError, 'Network release validation failed' unless ok
+    File.chmod(File.stat(lock_path).mode & 0o777, candidate_path)
+    File.rename(candidate_path, lock_path)
+    puts JSON.pretty_generate(candidate)
+  end
+rescue StandardError => error
+  warn "Network pin refresh failed: #{error.class}: #{error.message}"
+  exit 1
+end

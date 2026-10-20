@@ -1,0 +1,13 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+require 'bundler/setup'
+require_relative 'support/network_download'
+abort 'Usage: fetch-native LOCK DESTINATION' unless ARGV.size == 2
+begin
+  lock = File.expand_path(ARGV[0])
+  artifact = NetworkDownload.lock(lock).fetch('artifact')
+  NetworkDownload.fetch(artifact.fetch('url'), ARGV[1], sha256: artifact.fetch('sha256'), base: File.dirname(lock))
+rescue StandardError => error
+  warn "Native artifact download failed: #{error.class}: #{error.message}"
+  exit 1
+end

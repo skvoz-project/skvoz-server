@@ -1,0 +1,14 @@
+.bundle/
+vendor/bundle/
+artifacts/native/
+artifacts/server-image/
+*.log
+*.tmp
+AGENTS.md
+**/.knowledge/
+.agents/
+.codex/
+.aws/
+.idea/
+**/temp/
+native-check/

@@ -1,0 +1,56 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+require 'bundler/setup'
+require 'fileutils'
+require 'tmpdir'
+require_relative 'support/network_download'
+
+abort 'Usage: install-native LOCK DESTINATION [LOCAL_ARCHIVE]' unless ARGV.size.between?(2, 3)
+lock_path, destination, local_archive = ARGV.map { |path| File.expand_path(path) }
+begin
+  artifact = NetworkDownload.lock(lock_path).fetch('artifact')
+  raise ArgumentError, 'Native destination already exists' if File.exist?(destination) || File.symlink?(destination)
+  FileUtils.mkdir_p(File.dirname(destination))
+  Dir.mktmpdir('.skvoz-native-', File.dirname(destination)) do |temporary|
+    archive = NetworkDownload.fetch(local_archive ? "file:#{URI::DEFAULT_PARSER.escape(local_archive)}" : artifact.fetch('url'),
+      File.join(temporary, 'bundle.tar.gz'), sha256: artifact.fetch('sha256'), base: File.dirname(lock_path))
+    files = %w[
+      bin/skvoz-network-runtime
+      bin/skvoz-network-helper
+      lib/libskvoz_core.so
+      resources/systemd/skvoz-network-helper@.socket
+      resources/systemd/skvoz-network-helper@.service
+      resources/systemd/skvoz-network-helper.conf
+      resources/polkit/org.skvoz.network.policy
+      licenses/Network-MIT.txt
+      licenses/Core-MIT.txt
+      licenses/async-nats-Apache-2.0.txt
+      source-inputs.sha256
+      manifest.json
+    ]
+    staged = File.join(temporary, 'native')
+    Dir.mkdir(staged)
+    unless system({ 'TAR_OPTIONS' => nil }, 'timeout', '--signal=KILL', '60', 'tar', '-xzf', archive, '-C', staged,
+        '--no-same-owner', '--no-same-permissions', '--keep-old-files', '--no-recursion', '--', *files)
+      raise IOError, 'Native archive extraction failed'
+    end
+    files.each do |name|
+      path = File.join(staged, name)
+      raise ArgumentError, 'Native payload must be a regular file' unless File.lstat(path).file?
+      File.chmod(name.start_with?('bin/') ? 0o755 : 0o644, path)
+      parent = File.dirname(path)
+      while parent.start_with?(staged)
+        raise ArgumentError, 'Native parent must be a directory' unless File.lstat(parent).directory?
+        File.chmod(0o755, parent)
+        break if parent == staged
+        parent = File.dirname(parent)
+      end
+    end
+    unless system('mv', '-T', '--no-clobber', '--', staged, destination) && !File.exist?(staged)
+      raise ArgumentError, 'Native destination appeared during extraction'
+    end
+  end
+rescue StandardError => error
+  warn "Native artifact extraction failed: #{error.class}: #{error.message}"
+  exit 1
+end
