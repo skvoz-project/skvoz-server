@@ -157,7 +157,7 @@ while :; do
 done
 memory=$(( memory / 4096 * 4096 ))
 (( cpus >= 1 && memory >= 268435456 )) || { echo 'Insufficient host capacity' >&2; exit 1; }
-affinity=$(awk -v count="$cpus" '/^Cpus_allowed_list:/{n=split($2,a,","); for(i=1;i<=n;i++){split(a[i],r,"-"); end=r[2]==""?r[1]:r[2]; for(j=r[1];j<=end && count>0;j++,count--){printf "%s%s",sep,j;sep=","}}}' /proc/self/status)
+affinity=$(awk -v count="$cpus" '/^Cpus_allowed_list:/{n=split($2,a,","); for(i=1;i<=n;i++){split(a[i],r,"-"); end=r[2]==""?r[1]:r[2]; for(j=r[1];j<=end && count>0;j++){printf "%s%s",sep,j;sep=",";count--}}}' /proc/self/status)
 major_minor=$(findmnt -no MAJ:MIN -T "$PWD")
 device=$(lsblk -rno MAJ:MIN,PATH,PKNAME | awk -v id="$major_minor" '$1==id{print $3!=""?"/dev/"$3:$2;exit}')
 [[ -b $device ]] || { echo 'Actual backing block device required for I/O caps' >&2; exit 1; }
