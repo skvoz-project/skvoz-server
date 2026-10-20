@@ -63,54 +63,65 @@ BuildKit закреплены immutable digests в Dockerfile/owning CI. Bundler
 закреплены в Gemfile.lock. NATS/Ruby/Pebble/gems/native dependencies сохраняют
 свои upstream licenses; код Server — [MIT](../LICENSE).
 
-## Ограниченная сборка
+## GitHub Actions
 
-Owning CI запускает `bash bin/ci`: выбирает не более половины реально доступных
+Workflow вызывает `bash bin/ci` из clean checkout выбранного commit. Сценарий
+использует стандартный Docker и последовательно выполняет:
+
+1. Сборку `ruby-tests` и собственные Ruby specs.
+2. Получение закреплённого Network archive через собственный `bin/fetch-native`
+   с проверкой SHA256.
+3. Сборку `tests` и интеграционные specs с NATS и готовым Network.
+4. Сборку `deploy` и экспорт точного image ID, receipt и SHA256SUMS.
+
+Сборка Core/Network из исходников и Server fixtures других репозиториев не
+нужны. Ошибка тестов останавливает дальнейшую сборку и экспорт. Сценарий
+удаляет свой временный context и оставшийся test/fetch container при ошибке
+или отмене. Лимит времени45минут и concurrency задаёт workflow; проверки
+физических дисков, cgroup ancestry и локальные I/O limits в GitHub CI отсутствуют.
+Docker использует стандартный builder runner.
+
+## Локальная сборка с ограничениями
+
+Отдельный `bash bin/build-local` выбирает не более половины реально доступных
 host CPU/RAM с учётом ancestors, максимум4CPU/3GiB, swap0/PID256, backing-device
 read8MiB/s/write2MiB/s. Exact cgroup readbacks и живой25s RUN подтверждают ancestry
 под ограниченным BuildKit daemon. BuildKit и test containers работают последовательно;
-cache volume сохраняется только между owning targets и удаляется после job.
-Настройки Docker daemon и существующие builders не изменяются.
+cache volume сохраняется между targets и удаляется после запуска. Настройки
+Docker daemon и существующие builders не изменяются.
 
-BuildKit уже содержит `buildctl`; отдельные buildx binary, регистрация remote
-builder и общий Ruby launcher не нужны. Для локальной работы используйте тот же
-owning flow. Нужны Linux cgroup v2 с полной host visibility, Docker, Bash,
-coreutils/util-linux, Git и Ruby со стандартной библиотекой. Docker должен
-позволять чтение host PID/cgroup и применение backing-device I/O limits.
+Нужны Linux cgroup v2 с полной host visibility, Docker, Bash, coreutils/util-linux,
+Git и Ruby со стандартной библиотекой. Docker должен позволять чтение host
+PID/cgroup и применение backing-device I/O limits. GitHub runner этих локальных
+предпосылок не требует.
 
 ```sh
-bash bin/ci ruby-tests
-bash bin/ci tests
-bash bin/ci deploy artifacts/server-image/local
+bash bin/build-local ruby-tests
+bash bin/build-local tests
+bash bin/build-local deploy artifacts/server-image/local
 ```
 
-`ruby-tests` запускает собственные Ruby specs без native prerequisites; `tests`
-проверяет собственную интеграцию с закреплённым native bundle; `deploy` собирает
-и экспортирует продукт. Недостающий bundle скачивается ограниченным transport в
-приватный context, а не собирается из исходников. Уже скачанный regular archive
-по указанному выше пути используется повторно с проверкой закреплённого SHA256.
-Существующий совместимый Network release подходит без дополнительного инструмента.
+Без аргументов локальный сценарий выполняет все три этапа. `ruby-tests` не
+требует Network bundle; режимы `tests` и `deploy` получают закреплённый архив.
+Уже скачанный regular archive по пути из раздела выше используется повторно,
+а его SHA256 проверяется при импорте. Missing input не вызывает source fallback.
 
-Команда создаёт уникальный pinned BuildKit container с private cgroup namespace,
-`max-parallelism=1`, read-only owning public context в `/context`, своим output в
-`/output` и своим cache. Docker socket и sibling source не монтируются. Общий
-deadline —42 минуты работы и ещё не более2 минут для cleanup; failure сохраняется,
-пока не доказано отсутствие exact container names/IDs, записанных PID/start и
-cgroups, cache users и volume. Приватные локальные инструкции не нужны.
+Локальная команда создаёт уникальный pinned BuildKit container с private cgroup
+namespace, `max-parallelism=1`, read-only public context и своим output/cache.
+Docker socket и sibling source в builder не монтируются. Общий deadline —42минуты
+работы и ещё не более2минут для cleanup. Проверяется отсутствие своих exact
+container names/IDs, PID/start, cgroups и cache volume. При ошибке очистки evidence
+сохраняется. Приватные локальные инструкции для запуска не нужны.
 
-`bin/build-image` — маленькая внутренняя команда для трёх Server targets.
-Она проверяет pinned daemon identity и вызывает его `buildctl build
---frontend dockerfile.v0 --local context=/context --local dockerfile=/context
---opt target=deploy --output type=docker,...`, затем `docker image load` своего
-archive. `bin/ci` передаёт ей `SKVOZ_BUILDKIT_CONTAINER` и `SKVOZ_BUILD_OUTPUT`
-и владеет подготовкой, readbacks, deadline и cleanup. Локальный candidate имеет
-пустой source revision. Для квалификации существующего clean owning commit
-можно явно задать `SOURCE_REVISION=<FULL40SHA>`; реальный HEAD и clean worktree
-проверяются до сборки. Непустой revision обязателен опубликованному image.
+`bin/build-image` — внутренний helper только локального сценария: он использует
+включённый `buildctl` уже подготовленного BuildKit. `bin/build-local` передаёт
+ему `SKVOZ_BUILDKIT_CONTAINER` и `SKVOZ_BUILD_OUTPUT` и владеет ограничениями,
+проверками и очисткой. Для маркировки clean локального commit задайте
+`SOURCE_REVISION=<FULL40SHA>`; без него image остаётся локальным candidate.
 
-Docker image import и получение самого pinned BuildKit image выполняет host
-Docker service вне payload cgroup; это отдельная граница, не whole-host cap.
-Ошибки реальных limits/ancestry/OOM/swap или cleanup не считаются успешной сборкой.
+Docker image import и получение pinned BuildKit image выполняет host Docker
+service вне payload cgroup; это отдельная граница, не whole-host cap. Ошибки
+локальных limits/ancestry/OOM/swap или cleanup завершают локальную команду ошибкой.
 
 ## Готовый Server image
 
@@ -120,19 +131,18 @@ Docker service вне payload cgroup; это отдельная граница, 
 задаёт assets, pin/проверки и separate integration.
 
 ```sh
-bash bin/ci deploy <NEW_OUTPUT_DIRECTORY>
+bash bin/build-local deploy <NEW_OUTPUT_DIRECTORY>
 ```
 
-`bin/ci deploy` сохраняет свой capped BuildKit до завершения экспорта и передаёт
-его точный ID/output mapping в `bin/export-image`. Exporter проверяет этот
-pinned running daemon и writable `/output` bind, затем source/version/revision/
-platform labels выбранного image. При заданном revision он также проверяет
-clean actual HEAD до `docker image save` точного image ID. Несжатый archive
-пишется в собственный output mapping; включённый BusyBox `gzip -n` работает в
-том же ограниченном BuildKit container. Host Docker save/load остаётся вне
-payload cgroup. Receipt и SHA256SUMS описывают
-эти готовые bytes. Повторный output не заменяется; локальный candidate без
-`--revision` имеет `source.revision:null,tag:null` и не публикуется как release.
+`bin/export-image` проверяет source/version/revision/platform labels выбранного
+image. При заданном revision он также проверяет clean actual HEAD до
+`docker image save` точного image ID. В GitHub CI архив сжимается обычным
+`gzip -n` на runner. Локальный `bin/build-local` передаёт pinned BuildKit и
+проверяемый writable `/output` mapping; в этом режиме сжатие выполняет BusyBox
+в ограниченном container. Host Docker save/load остаётся вне payload cgroup.
+Receipt и SHA256SUMS описывают готовые bytes. Повторный output не заменяется;
+локальный candidate без `--revision` имеет `source.revision:null,tag:null` и
+не публикуется как release.
 `gzip` metadata детерминированы, но это не обещает равенство independently rebuilt
 Docker archive/layers. Image ID, source scope и selected dependency lock
 сохраняются отдельно; результат старого image не переносится на новую сборку.

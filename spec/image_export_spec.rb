@@ -36,6 +36,7 @@ RSpec.describe 'Ready Server product image export' do
       'Config' => { 'Entrypoint' => ['skvoz-server'], 'Labels' => { 'org.opencontainers.image.source' => ServerImage::SOURCE,
         'org.opencontainers.image.version' => '8.0.1', 'org.opencontainers.image.revision' => '' } } }
     @commands = []
+    real_capture = Open3.method(:capture3)
     status = instance_double(Process::Status, success?: true)
     allow(Open3).to receive(:capture3) do |*argv|
       @commands << argv
@@ -56,9 +57,27 @@ RSpec.describe 'Ready Server product image export' do
         ['', '', status]
       elsif command.first == 'git'
         [command.include?('rev-parse') ? @revision.to_s + "\n" : (@dirty ? ' M README.md' : ''), '', status]
+      elsif command.first == 'gzip'
+        real_capture.call(*argv)
       else
         raise "Unexpected export command: #{command}"
       end
+    end
+  end
+
+  it 'exports on a CI runner using host gzip without a prepared local builder' do
+    ENV.delete('SKVOZ_BUILDKIT_CONTAINER')
+    ENV.delete('SKVOZ_BUILD_OUTPUT')
+    Dir.mktmpdir('skvoz-ci-export-') do |directory|
+      output = File.join(directory, 'release')
+      export(@image_id, output)
+      expect(ServerImage.read(output).fetch('image_id')).to eq(@image_id)
+      Zlib::GzipReader.open(File.join(output, ServerImage::ASSET)) do |gzip|
+        expect(gzip.mtime.to_i).to eq(0)
+        expect(gzip.read).to eq('opaque bytes emitted by Docker image save')
+      end
+      expect(@commands.none? { |argv| argv.drop(3).take(3) == %w[docker container inspect] }).to be(true)
+      expect(@commands.flatten).not_to include('exec')
     end
   end
 

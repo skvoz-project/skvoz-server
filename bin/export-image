@@ -24,14 +24,17 @@ begin
     raise ArgumentError, 'Server source revision mismatch' unless command.call('git', '-C', root, 'rev-parse', 'HEAD').strip == revision
     raise ArgumentError, 'Server source tree is dirty' unless command.call('git', '-C', root, 'status', '--porcelain', '--untracked-files=all').empty?
   end
-  builder = ENV.fetch('SKVOZ_BUILDKIT_CONTAINER')
-  mapped_output = File.realpath(ENV.fetch('SKVOZ_BUILD_OUTPUT'))
-  builder_row = JSON.parse(command.call('docker', 'container', 'inspect', builder)).fetch(0)
-  unless builder_row.dig('State', 'Running') && builder_row.dig('Config', 'Image') == 'moby/buildkit@sha256:a82d1ab899cda51aade6fe818d71e4b58c4079e047a0cf29dbb93b2b0465ea69' &&
-      builder_row.fetch('Mounts').any? { |mount| mount.values_at('Type', 'Source', 'Destination', 'RW') == ['bind', mapped_output, '/output', true] }
-    raise ArgumentError, 'Prepared capped BuildKit output mapping differs'
+  builder = ENV['SKVOZ_BUILDKIT_CONTAINER']
+  mapped_output = nil
+  if builder
+    mapped_output = File.realpath(ENV.fetch('SKVOZ_BUILD_OUTPUT'))
+    builder_row = JSON.parse(command.call('docker', 'container', 'inspect', builder)).fetch(0)
+    unless builder_row.dig('State', 'Running') && builder_row.dig('Config', 'Image') == 'moby/buildkit@sha256:a82d1ab899cda51aade6fe818d71e4b58c4079e047a0cf29dbb93b2b0465ea69' &&
+        builder_row.fetch('Mounts').any? { |mount| mount.values_at('Type', 'Source', 'Destination', 'RW') == ['bind', mapped_output, '/output', true] }
+      raise ArgumentError, 'Prepared capped BuildKit output mapping differs'
+    end
+    builder = builder_row.fetch('Id')
   end
-  builder = builder_row.fetch('Id')
   image = JSON.parse(command.call('docker', 'image', 'inspect', image_id)).fetch(0)
   labels = image.dig('Config', 'Labels') || {}
   unless image['Id'] == image_id && image.values_at('Os', 'Architecture') == %w[linux amd64] &&
@@ -47,9 +50,13 @@ begin
     command.call('docker', 'image', 'save', '--output', tar, image_id)
     raise ArgumentError, 'Docker image archive exceeds limit' if File.size(tar) > 1024 * 1024 * 1024
     archive = File.join(temporary, 'image.tar.gz')
-    mapped = '/output/' + File.basename(temporary)
-    command.call('docker', 'exec', builder, '/bin/busybox', 'sh', '-ec',
-      'exec /bin/busybox gzip -n -c "$1" > "$2"', 'gzip', mapped + '/image.tar', mapped + '/image.tar.gz')
+    if builder
+      mapped = '/output/' + File.basename(temporary)
+      command.call('docker', 'exec', builder, '/bin/busybox', 'sh', '-ec',
+        'exec /bin/busybox gzip -n -c "$1" > "$2"', 'gzip', mapped + '/image.tar', mapped + '/image.tar.gz')
+    else
+      command.call('gzip', '-n', tar)
+    end
     File.rename(archive, File.join(output, ServerImage::ASSET))
   end
   receipt = { schema: 1, component: 'skvoz-server', version: '8.0.1', target: 'x86_64-unknown-linux-gnu',

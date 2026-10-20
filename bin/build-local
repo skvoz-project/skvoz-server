@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# Local Server builds with explicit host resource limits and cleanup checks.
+set -euo pipefail
+if [[ ${SKVOZ_SERVER_LOCAL_BOUNDED:-} != 1 ]]; then
+  # One original work deadline; TERM allows only the reserved cleanup interval.
+  exec env SKVOZ_SERVER_LOCAL_BOUNDED=1 timeout --kill-after=120s 2520s bash "$0" "$@"
+fi
+mode=${1:-qualify}
+case "$mode" in qualify|ruby-tests|tests|deploy) ;; *) echo 'Usage: bash bin/build-local [qualify|ruby-tests|tests|deploy] [NEW_IMAGE_OUTPUT_DIRECTORY]' >&2; exit 1;; esac
+[[ $# -le 2 && ( $# -le 1 || $mode == deploy ) ]] || { echo 'Image output is only valid for deploy mode' >&2; exit 1; }
+source_revision=${SOURCE_REVISION:-}
+cd "$(dirname "$0")/.."
+buildkit=moby/buildkit@sha256:a82d1ab899cda51aade6fe818d71e4b58c4079e047a0cf29dbb93b2b0465ea69
+if [[ -n $source_revision ]]; then
+  [[ $source_revision =~ ^[a-f0-9]{40}$ && $(git rev-parse HEAD) == "$source_revision" && -z $(git status --porcelain --untracked-files=all) ]] || { echo 'A source revision requires actual clean owning HEAD' >&2; exit 1; }
+fi
+image_output=${2:-$PWD/artifacts/server-image}
+work=$(mktemp -d "${TMPDIR:-/tmp}/skvoz-server-local.XXXXXX")
+token=skvoz-server-ci-$(basename "$work")
+cache=$token-cache
+builder= test_container= probe_job= cache_created=false
+work_deadline=$(( SECONDS + 2520 ))
+final_deadline=$(( SECONDS + 2640 ))
+cleanup_deadline=$final_deadline
+cleanup_phase=false
+declare -a owned_names=() owned_ids=()
+declare -A payload_groups=() payload_pids=() payload_starts=() removed=() removal_requested=() builder_stop_requested=() removal_failed=() removal_deadlines=()
+cleanup_failed=false
+begin_cleanup() {
+  if ! $cleanup_phase; then
+    cleanup_phase=true
+    cleanup_deadline=$((SECONDS+120))
+    (( cleanup_deadline <= final_deadline )) || cleanup_deadline=$final_deadline
+  fi
+}
+docker() {
+  local deadline=$work_deadline remaining
+  $cleanup_phase && deadline=$cleanup_deadline
+  if [[ -n ${removal_deadline:-} ]] && (( removal_deadline < deadline )); then deadline=$removal_deadline; fi
+  remaining=$(( deadline - SECONDS - 2 )) # Include timeout's KILL grace in the original bound.
+  (( remaining > 0 )) || { echo 'Original Server CI deadline reached' >&2; return 124; }
+  (( remaining <= 30 )) || remaining=30
+  command timeout --kill-after=2s "${remaining}s" docker "$@"
+}
+confirm_absent() {
+  local identity=$1 code
+  absence_command_failed=false
+  if docker container inspect --format '{{.Id}}' "$identity" > "$work/absence.stdout" 2> "$work/absence.stderr"; then
+    echo 'Owned container still exists' >&2; return 1
+  else
+    code=$?
+    if [[ $code == 1 && -z $(LC_ALL=C tr -d '[:space:]' < "$work/absence.stdout") &&
+      $(cat "$work/absence.stderr") == "Error response from daemon: No such container: $identity" ]]; then return 0; fi
+    absence_command_failed=true; return 1
+  fi
+}
+remove_container() {
+  local id=$1 name=$2 current_start= stopped= before_stop= removal_deadline=$((SECONDS+120))
+  if [[ -n ${removal_deadlines[$id]:-} ]]; then removal_deadline=${removal_deadlines[$id]}; fi
+  (( removal_deadline <= final_deadline )) || removal_deadline=$final_deadline
+  if $cleanup_phase && (( cleanup_deadline < removal_deadline )); then removal_deadline=$cleanup_deadline; fi
+  removal_deadlines[$id]=$removal_deadline
+  if [[ ${removal_requested[$id]:-} != true ]]; then
+    if [[ $name == "$token-builder" && ${builder_stop_requested[$id]:-} != true ]]; then
+      builder_stop_requested[$id]=true
+      before_stop=$(docker inspect --format '{{.State.Running}} {{.State.Pid}}' "$id") || removal_failed[$id]=true
+      [[ $before_stop == "true ${payload_pids[$id]:-unrecorded}" ]] || removal_failed[$id]=true
+      docker stop --time 20 "$id" >/dev/null || removal_failed[$id]=true
+      if stopped=$(docker inspect --format '{{.State.Running}} {{.State.Pid}} {{.State.ExitCode}} {{.State.OOMKilled}} {{json .State.Error}}' "$id"); then
+        # BuildKit reports signal cancellation as exit1 after graceful shutdown.
+        [[ $stopped == 'false 0 0 false ""' || $stopped == 'false 0 1 false ""' || $stopped == 'false 0 143 false ""' ]] || removal_failed[$id]=true
+      else removal_failed[$id]=true; fi
+    fi
+    removal_requested[$id]=true
+    docker rm -f "$id" >/dev/null || removal_failed[$id]=true
+  fi
+  while ! { confirm_absent "$id" && confirm_absent "$name"; } 2>> "$work/cleanup-status.log"; do
+    $absence_command_failed && removal_failed[$id]=true
+    (( SECONDS < removal_deadline )) || return 1
+    sleep 1
+  done
+  [[ -z ${payload_groups[$id]:-} || ! -e /sys/fs/cgroup${payload_groups[$id]} ]] || return 1
+  if [[ -n ${payload_pids[$id]:-} && -f /proc/${payload_pids[$id]}/stat ]]; then
+    current_start=$(awk '{sub(/^.*\) /, ""); print $20}' "/proc/${payload_pids[$id]}/stat")
+    [[ $current_start != "${payload_starts[$id]}" ]] || return 1
+  fi
+  removed[$id]=true
+  [[ ${removal_failed[$id]:-} != true ]]
+}
+cleanup() {
+  local code=$? index id name users= volumes= recovered=
+  trap - EXIT INT TERM HUP
+  begin_cleanup
+  for id in "${!removal_deadlines[@]}"; do
+    if [[ ${removed[$id]:-} != true || ${removal_failed[$id]:-} == true ]] && (( removal_deadlines[$id] < cleanup_deadline )); then
+      cleanup_deadline=${removal_deadlines[$id]}
+    fi
+  done
+  if [[ -n $probe_job ]]; then kill -KILL -- "-$probe_job" 2>/dev/null || true; wait "$probe_job" 2>/dev/null || true; fi
+  for ((index=${#owned_names[@]}-1; index>=0; index--)); do
+    name=${owned_names[index]}; id=${owned_ids[index]:-}
+    [[ -z $id || ${removed[$id]:-} != true ]] || continue
+    if [[ -z $id ]]; then
+      if recovered=$(docker container inspect --format '{{.Id}}' "$name"); then
+        [[ $recovered =~ ^[a-f0-9]{64}$ ]] || { cleanup_failed=true; continue; }
+        id=$recovered
+      else confirm_absent "$name" || cleanup_failed=true; continue; fi
+    fi
+    remove_container "$id" "$name" || cleanup_failed=true
+  done
+  if $cache_created; then
+    users=$(docker ps -aq --filter "volume=$cache") || cleanup_failed=true
+    [[ -z $users ]] || cleanup_failed=true
+    docker volume rm "$cache" >/dev/null || cleanup_failed=true
+    volumes=$(docker volume ls -q --filter "name=^$cache$") || cleanup_failed=true
+    [[ -z $volumes ]] || cleanup_failed=true
+  fi
+  if $cleanup_failed; then echo "Server CI cleanup failed; evidence retained: $work" >&2; exit 1; fi
+  rm -rf "$work"
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
+mkdir -p "$work/context"
+git ls-files --cached --others --exclude-standard -z | while IFS= read -r -d '' input; do
+  [[ ! -L $input ]] || { echo 'Source symlinks require explicit build context handling' >&2; exit 1; }
+  [[ ! -f $input ]] || printf '%s\0' "$input"
+done | tar --null -T - -cf - | tar -xf - -C "$work/context"
+
+# Select <=half actual available host capacity, including all current ancestors.
+[[ ! -e /sys/fs/cgroup/cpu.max && ! -e /sys/fs/cgroup/memory.max ]] || { echo 'Full host cgroup visibility required' >&2; exit 1; }
+cpus=$(( $(nproc) / 2 )); (( cpus <= 4 )) || cpus=4
+available=$(awk '/^MemAvailable:/{printf "%.0f", $2*1024}' /proc/meminfo)
+memory=$(( available / 2 )); (( memory <= 3221225472 )) || memory=3221225472
+group=$(awk -F: '$1=="0"{print $3}' /proc/self/cgroup)
+current=/sys/fs/cgroup$group
+while :; do
+  if [[ -f $current/cpu.max ]]; then
+    read -r quota period < "$current/cpu.max"
+    if [[ $quota != max ]]; then ceiling=$(( quota / period / 2 )); (( cpus <= ceiling )) || cpus=$ceiling; fi
+  fi
+  if [[ -f $current/memory.max ]]; then
+    read -r ceiling < "$current/memory.max"
+    if [[ $ceiling != max ]]; then
+      read -r used < "$current/memory.current"
+      remaining=$(( (ceiling-used)/2 )); (( memory <= remaining )) || memory=$remaining
+    fi
+  fi
+  [[ $current == /sys/fs/cgroup ]] && break
+  [[ $current == /sys/fs/cgroup/* ]] || { echo 'Invalid cgroup ancestry' >&2; exit 1; }
+  current=$(dirname "$current")
+done
+memory=$(( memory / 4096 * 4096 ))
+(( cpus >= 1 && memory >= 268435456 )) || { echo 'Insufficient host capacity' >&2; exit 1; }
+affinity=$(awk -v count="$cpus" '/^Cpus_allowed_list:/{n=split($2,a,","); for(i=1;i<=n;i++){split(a[i],r,"-"); end=r[2]==""?r[1]:r[2]; for(j=r[1];j<=end && count>0;j++){printf "%s%s",sep,j;sep=",";count--}}}' /proc/self/status)
+major_minor=$(findmnt -no MAJ:MIN -T "$PWD")
+device=$(lsblk -rno MAJ:MIN,PATH,PKNAME | awk -v id="$major_minor" '$1==id{print $3!=""?"/dev/"$3:$2;exit}')
+[[ -b $device ]] || { echo 'Actual backing block device required for I/O caps' >&2; exit 1; }
+major_minor=$(lsblk -dnro MAJ:MIN "$device")
+limits=(--cpus "$cpus" --cpuset-cpus "$affinity" --memory "$memory" --memory-swap "$memory" --pids-limit 256
+  --device-read-bps "$device:8mb" --device-write-bps "$device:2mb" --ulimit core=0 --ulimit nofile=8192:8192)
+# Compare numeric sets because the kernel canonicalizes e.g. 0,1 to 0-1.
+normalize_cpus() { awk -v list="$1" 'BEGIN{n=split(list,a,",");for(i=1;i<=n;i++){split(a[i],r,"-");end=r[2]==""?r[1]:r[2];for(j=r[1];j<=end;j++)printf "%s,",j}}'; }
+verify() {
+  local id=$1 pid path current quota period ceiling used own_memory resident_memory parent_affinity remaining_memory start membership part prefix scope=
+  local -a membership_parts
+  pid=$(docker inspect --format '{{.State.Pid}}' "$id")
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  membership=$(awk -F: '$1=="0"{print $3}' "/proc/$pid/cgroup")
+  start=$(awk '{sub(/^.*\) /, ""); print $20}' "/proc/$pid/stat")
+  [[ -z ${payload_pids[$id]:-} || ( ${payload_pids[$id]} == "$pid" && ${payload_starts[$id]} == "$start" ) ]] || return 1
+  payload_pids[$id]=$pid
+  payload_starts[$id]=$start
+  # BuildKit can move init into a child cgroup. Caps belong to the exact Docker
+  # ancestor, which must occur exactly once in the real host membership path.
+  IFS=/ read -r -a membership_parts <<< "$membership"
+  prefix=
+  for part in "${membership_parts[@]}"; do
+    [[ -n $part ]] || continue
+    prefix+=/$part
+    if [[ $part == docker-"$id".scope || $part == "$id" ]]; then
+      [[ -z $scope ]] || return 1
+      scope=$prefix
+    fi
+  done
+  [[ -n $scope && ( $membership == "$scope" || $membership == "$scope/"* ) ]] || { echo "Docker payload ancestor missing: $membership" >&2; return 1; }
+  path=/sys/fs/cgroup$scope
+  [[ -z ${payload_groups[$id]:-} || ${payload_groups[$id]} == "$scope" ]] || return 1
+  payload_groups[$id]=$scope
+  [[ $(cat "$path/cpu.max") == "$((cpus*100000)) 100000" && $(cat "$path/memory.max") == "$memory" &&
+     $(cat "$path/memory.swap.max") == 0 && $(cat "$path/pids.max") == 256 &&
+     $(cat "$path/io.max") == "$major_minor rbps=8388608 wbps=2097152 riops=max wiops=max" ]] || { echo 'Actual payload caps differ' >&2; return 1; }
+  [[ $(cat "$path/memory.swap.current") == 0 ]] && awk '$1=="oom" || $1=="oom_kill"{if($2!=0)exit 1}' "$path/memory.events"
+  own_memory=$(cat "$path/memory.current")
+  resident_memory=$(awk '$1=="anon" || $1=="kernel_stack" || $1=="pagetables" || $1=="sock" || $1=="percpu" || $1=="slab_unreclaimable"{sum+=$2} END{printf "%.0f",sum}' "$path/memory.stat")
+  parent_affinity=$(cat "$path/cpuset.cpus.effective")
+  [[ $(normalize_cpus "$affinity") == "$(normalize_cpus "$parent_affinity")" ]] || { echo 'Actual CPU affinity differs' >&2; return 1; }
+  current=$(dirname "$path")
+  while :; do
+    if [[ -f $current/cpuset.cpus.effective ]]; then
+      parent_affinity=$(cat "$current/cpuset.cpus.effective")
+      (( $(normalize_cpus "$parent_affinity" | awk -F, '{print NF-1}') >= 2*cpus )) || return 1
+    fi
+    if [[ -f $current/cpu.max ]]; then
+      read -r quota period < "$current/cpu.max"
+      [[ $quota == max ]] || (( quota >= 2*cpus*period )) || { echo 'Daemon CPU ancestor is too small' >&2; return 1; }
+    fi
+    if [[ -f $current/memory.max ]]; then
+      read -r ceiling < "$current/memory.max"
+      if [[ $ceiling != max ]]; then
+        read -r used < "$current/memory.current"
+        # Add back this payload's charge; preflight already reserved its budget.
+        (( ceiling-used+own_memory >= 2*memory )) || return 1
+      fi
+    fi
+    if [[ $current == /sys/fs/cgroup ]]; then
+      remaining_memory=$(awk '/^MemAvailable:/{printf "%.0f", $2*1024}' /proc/meminfo)
+      # MemAvailable already includes reclaimable file cache; credit only this
+      # payload's resident anonymous and unreclaimable kernel charge here.
+      (( remaining_memory+resident_memory >= 2*memory )) || return 1
+      break
+    fi
+    [[ $current == /sys/fs/cgroup/* ]] || return 1
+    current=$(dirname "$current")
+  done
+  printf 'Verified payload %s host PID %s membership %s capped ancestor %s\n' "$id" "$pid" "$membership" "$path"
+}
+docker pull "$buildkit"
+docker volume create "$cache" >/dev/null; cache_created=true
+printf '[worker.oci]\n  max-parallelism = 1\n[worker.containerd]\n  enabled = false\n' > "$work/buildkitd.toml"
+build() {
+  local target=$1 run_pid= run_group= builder_pid builder_group observed=false probe_seconds
+  owned_names+=("$token-builder")
+  builder=$(docker create --name "$token-builder" --privileged --cgroupns private "${limits[@]}" --network bridge \
+    --mount "type=bind,src=$work/context,dst=/context,readonly" \
+    --mount "type=bind,src=$work,dst=/output" \
+    --mount "type=volume,src=$cache,dst=/var/lib/buildkit" \
+    --mount "type=bind,src=$work/buildkitd.toml,dst=/etc/buildkit/buildkitd.toml,readonly" \
+    "$buildkit" --config /etc/buildkit/buildkitd.toml)
+  owned_ids+=("$builder")
+  docker start "$builder" >/dev/null
+  verify "$builder"
+  mkdir -p "$work/probe"
+  printf 'FROM %s\nARG PROBE_TOKEN\nRUN /bin/busybox sh -c '\''echo "$PROBE_TOKEN"; exec /bin/busybox sleep 25'\''\n' "$buildkit" > "$work/probe/Dockerfile"
+  probe_seconds=$((work_deadline-SECONDS)); (( probe_seconds > 0 )) || return 124
+  (( probe_seconds <= 90 )) || probe_seconds=90
+  setsid timeout --kill-after=2s "${probe_seconds}s" /usr/bin/docker exec "$builder" buildctl --wait build --frontend dockerfile.v0 \
+    --local context=/output/probe --local dockerfile=/output/probe --opt "build-arg:PROBE_TOKEN=$token-$target" > "$work/probe.log" 2>&1 &
+  probe_job=$!
+  builder_pid=$(docker inspect --format '{{.State.Pid}}' "$builder")
+  builder_group=${payload_groups[$builder]}
+  for _ in {1..200}; do
+    run_pid=$(docker top "$builder" -eo pid,args | awk '$2=="/bin/busybox" && $3=="sleep" && $4=="25"{print $1;exit}')
+    if [[ -n $run_pid ]]; then
+      run_group=$(awk -F: '$1=="0"{print $3}' "/proc/$run_pid/cgroup")
+      [[ $run_group == "$builder_group/"* ]] || { echo 'Actual RUN escaped capped builder ancestor' >&2; return 1; }
+      printf 'Observed actual held RUN PID %s cgroup %s\n' "$run_pid" "$run_group"
+      observed=true; break
+    fi
+    sleep 0.1
+  done
+  wait "$probe_job"; probe_job=
+  $observed || { echo 'Actual capped RUN was not observed' >&2; return 1; }
+  timeout --kill-after=5s "$((work_deadline-SECONDS))s" env SKVOZ_BUILDKIT_CONTAINER="$builder" SKVOZ_BUILD_OUTPUT="$work" SOURCE_REVISION="$source_revision" sh bin/build-image "$target" "skvoz-server:ci-$target"
+  verify "$builder"
+  if [[ $target != deploy ]]; then remove_container "$builder" "$token-builder"; builder=; fi
+}
+run_tests() {
+  local target=$1
+  owned_names+=("$token-tests")
+  test_container=$(docker create --name "$token-tests" --cgroupns private "${limits[@]}" --cap-drop ALL \
+    --security-opt no-new-privileges:true --entrypoint sleep "skvoz-server:ci-$target" 650)
+  owned_ids+=("$test_container")
+  docker start "$test_container" >/dev/null
+  verify "$test_container"
+  timeout --kill-after=5s "$(( (work_deadline-SECONDS)<600 ? work_deadline-SECONDS : 600 ))s" /usr/bin/docker exec "$test_container" bundle exec rspec spec
+  verify "$test_container"
+  [[ $mode != "$target" ]] || begin_cleanup
+  remove_container "$test_container" "$token-tests"; test_container=
+}
+native_archive=artifacts/native/skvoz-network-0.7.0-x86_64-unknown-linux-gnu-current-identity.tar.gz
+prepare_native() {
+  mkdir -p "$work/context/artifacts/native"
+  if [[ -f $native_archive && ! -L $native_archive ]]; then
+    cp "$native_archive" "$work/context/$native_archive"
+    return
+  fi
+  if [[ ${ruby_built:-false} != true ]]; then build ruby-tests; ruby_built=true; fi
+  owned_names+=("$token-fetch")
+  test_container=$(docker create --name "$token-fetch" --cgroupns private "${limits[@]}" --cap-drop ALL \
+    --security-opt no-new-privileges:true --user "$(id -u):$(id -g)" \
+    --mount "type=bind,src=$work/context,dst=/candidate" --workdir /candidate --entrypoint sleep skvoz-server:ci-ruby-tests 150)
+  owned_ids+=("$test_container")
+  docker start "$test_container" >/dev/null
+  verify "$test_container"
+  timeout --kill-after=5s "$(( (work_deadline-SECONDS)<130 ? work_deadline-SECONDS : 130 ))s" /usr/bin/docker exec "$test_container" ruby bin/fetch-native product-native-lock.json "$native_archive"
+  verify "$test_container"
+  remove_container "$test_container" "$token-fetch"; test_container=
+}
+if [[ $mode == qualify || $mode == ruby-tests ]]; then
+  build ruby-tests; ruby_built=true
+  run_tests ruby-tests
+fi
+if [[ $mode == qualify || $mode == tests || $mode == deploy ]]; then prepare_native; fi
+if [[ $mode == qualify || $mode == tests ]]; then build tests; run_tests tests; fi
+if [[ $mode != qualify && $mode != deploy ]]; then exit 0; fi
+build deploy
+image_id=$(docker image inspect --format '{{.Id}}' skvoz-server:ci-deploy)
+revision_arguments=()
+[[ -z $source_revision ]] || revision_arguments=(--revision "$source_revision")
+mkdir -p "$(dirname "$image_output")"
+timeout --kill-after=5s "$((work_deadline-SECONDS))s" env SKVOZ_BUILDKIT_CONTAINER="$builder" SKVOZ_BUILD_OUTPUT="$work" ruby bin/export-image "${revision_arguments[@]}" "$image_id" "$image_output"
+verify "$builder"
+begin_cleanup
+remove_container "$builder" "$token-builder"; builder=

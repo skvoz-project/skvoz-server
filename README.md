@@ -45,20 +45,23 @@ Release → Actions потребителя с exact URL/SHA256. Server закр�
 target, ABI и install closure проверяются до установки. Отсутствующий или
 несовместимый bundle не вызывает сборку исходников.
 
-Для локальной сборки требуется Linux с Docker и полной видимостью host cgroup v2.
-Owning команда сама подготавливает ограниченный BuildKit, проверяет реальные
-лимиты и удаляет свои containers/cache. Подробности — в [инструкции](docs/artifacts.md).
+GitHub Actions запускает `bash bin/ci`: собирает Docker targets, выполняет Ruby
+и интеграционные тесты, затем экспортирует продуктовый образ. Для этого не нужны
+доступ к физическому диску runner или специальные проверки cgroup. Следующий
+job публикует образ и контрольные суммы в GitHub Releases.
+
+Для локальной сборки с ограничением нагрузки используется отдельная команда:
 
 ```sh
-bash bin/ci deploy artifacts/server-image/local
+bash bin/build-local deploy artifacts/server-image/local
 docker image tag skvoz-server:ci-deploy skvoz-server:8.0.1
 ```
 
-Compose использует этот локальный образ с `pull_policy: never`; CI не публикует
-registry-образы. Собственный опубликованный образ можно выбрать в настройках установки.
-Owning CI использует стандартный capped BuildKit с включённым buildctl,
-реальными cgroup readbacks и live RUN ancestry.
-[Параметры и границы проверки](docs/artifacts.md#ограниченная-сборка).
+Локальный сценарий требует Linux с Docker и полной видимостью host cgroup v2.
+Он подготавливает ограниченный BuildKit, проверяет реальные лимиты и удаляет
+свои временные containers/cache. Подробности — в [инструкции](docs/artifacts.md#локальная-сборка-с-ограничениями).
+Compose использует локальный образ с `pull_policy: never`; registry-образ для
+сборки и публикации архива не требуется.
 [Проверки](docs/server-connector.md#регрессионные-проверки) запускаются напрямую
 через RSpec; [отдельная совместимость клиентов](docs/interoperability.md) использует
 готовый продуктовый image и существующее локальное администрирование.

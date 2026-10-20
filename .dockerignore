@@ -16,6 +16,7 @@
 !bin/support/network_download.rb
 !bin/support/server_image.rb
 !bin/build-image
+!bin/ci
 !lib/
 !lib/skvoz/
 !lib/skvoz/server/

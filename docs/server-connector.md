@@ -556,10 +556,7 @@ Helper допускает конечное ожидание подготовки
 всё для контрактных и реальных процессных проверок сервера, TLS и ACME:
 
 ```sh
-SKVOZ_BUILDKIT_CONTAINER=<EXACT_OWNED_BUILDKIT_ID> \
-SKVOZ_BUILD_OUTPUT=<OWNED_HOST_OUTPUT_DIRECTORY> \
-sh bin/build-image tests skvoz-server:tests
-docker run --rm --cap-drop ALL --security-opt no-new-privileges:true skvoz-server:tests
+bash bin/build-local tests
 ```
 
 Для разработки `bundle exec rspec spec` из корня репозитория запускает
