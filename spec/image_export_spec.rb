@@ -2,9 +2,8 @@
 require_relative 'spec_helper'
 require 'open3'
 require 'zlib'
-require_relative '../bin/support/server_image'
 
-RSpec.describe 'Ready Server product image export' do
+RSpec.describe 'Server image export for CI handoff and local builds' do
   around do |example|
     Dir.mktmpdir('skvoz-mapped-export-') do |directory|
       @mapped_output = directory
@@ -33,8 +32,8 @@ RSpec.describe 'Ready Server product image export' do
       'Mounts' => [{ 'Type' => 'bind', 'Source' => @mapped_output, 'Destination' => '/output', 'RW' => true }] }
     @revision, @dirty = nil, false
     @image = { 'Id' => @image_id, 'Os' => 'linux', 'Architecture' => 'amd64',
-      'Config' => { 'Entrypoint' => ['skvoz-server'], 'Labels' => { 'org.opencontainers.image.source' => ServerImage::SOURCE,
-        'org.opencontainers.image.version' => '8.0.1', 'org.opencontainers.image.revision' => '' } } }
+      'Config' => { 'Entrypoint' => ['skvoz-server'], 'Labels' => { 'org.opencontainers.image.source' => 'https://github.com/skvoz-project/skvoz-server',
+        'org.opencontainers.image.version' => '9.0.0', 'org.opencontainers.image.revision' => '' } } }
     @commands = []
     real_capture = Open3.method(:capture3)
     status = instance_double(Process::Status, success?: true)
@@ -71,8 +70,8 @@ RSpec.describe 'Ready Server product image export' do
     Dir.mktmpdir('skvoz-ci-export-') do |directory|
       output = File.join(directory, 'release')
       export(@image_id, output)
-      expect(ServerImage.read(output).fetch('image_id')).to eq(@image_id)
-      Zlib::GzipReader.open(File.join(output, ServerImage::ASSET)) do |gzip|
+      expect(File.read(File.join(output, 'image-id')).strip).to eq(@image_id)
+      Zlib::GzipReader.open(File.join(output, 'server-image.tar.gz')) do |gzip|
         expect(gzip.mtime.to_i).to eq(0)
         expect(gzip.read).to eq('opaque bytes emitted by Docker image save')
       end
@@ -81,14 +80,14 @@ RSpec.describe 'Ready Server product image export' do
     end
   end
 
-  it 'saves only the exact image ID and wraps those bytes with checked receipt and deterministic gzip metadata' do
+  it 'exports the exact image bytes with deterministic gzip and checksums for job handoff' do
     Dir.mktmpdir('skvoz-image-export-') do |directory|
       first, second = %w[first second].map { |name| File.join(directory, name) }
       export(@image_id, first)
       export(@image_id, second)
-      receipt = ServerImage.read(first)
-      expect(receipt).to include('image_id' => @image_id, 'source' => { 'repository' => ServerImage::SOURCE, 'revision' => nil }, 'tag' => nil)
-      Zlib::GzipReader.open(File.join(first, ServerImage::ASSET)) do |gzip|
+      expect(File.read(File.join(first, 'image-id')).strip).to eq(@image_id)
+      expect(system('sha256sum', '--check', '--strict', 'SHA256SUMS', chdir: first, out: File::NULL)).to be(true)
+      Zlib::GzipReader.open(File.join(first, 'server-image.tar.gz')) do |gzip|
         expect(gzip.mtime.to_i).to eq(0)
         expect(gzip.read).to eq('opaque bytes emitted by Docker image save')
       end
@@ -104,7 +103,7 @@ RSpec.describe 'Ready Server product image export' do
     Dir.mktmpdir('skvoz-image-rejection-') do |directory|
       @image['Config']['Labels']['org.opencontainers.image.version'] = 'wrong'
       expect { export(@image_id, File.join(directory, 'wrong-version')) }.to raise_error(SystemExit)
-      @image['Config']['Labels']['org.opencontainers.image.version'] = '8.0.1'
+      @image['Config']['Labels']['org.opencontainers.image.version'] = '9.0.0'
       @image['Architecture'] = 'arm64'
       expect { export(@image_id, File.join(directory, 'wrong-target')) }.to raise_error(SystemExit)
       expect { export('skvoz-server:latest', File.join(directory, 'mutable')) }.to raise_error(SystemExit)
@@ -112,12 +111,12 @@ RSpec.describe 'Ready Server product image export' do
     end
   end
 
-  it 'embeds only an actual clean owning source commit and rejects mismatches or dirt before Docker' do
+  it 'requires the actual clean owning source commit when a revision is provided' do
     Dir.mktmpdir('skvoz-image-revision-') do |directory|
       @revision = 'a' * 40
       @image['Config']['Labels']['org.opencontainers.image.revision'] = @revision
       export('--revision', @revision, @image_id, File.join(directory, 'valid'))
-      expect(ServerImage.read(File.join(directory, 'valid'), revision: @revision).fetch('tag')).to eq("server-v8.0.1-#{@revision}")
+      expect(File.read(File.join(directory, 'valid', 'image-id')).strip).to eq(@image_id)
       @commands.clear
       expect { export('--revision', 'c' * 40, @image_id, File.join(directory, 'mismatch')) }.to raise_error(SystemExit)
       @dirty = true

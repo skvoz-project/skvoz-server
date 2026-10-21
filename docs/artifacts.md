@@ -72,7 +72,7 @@ Workflow вызывает `bash bin/ci` из clean checkout выбранного
 2. Получение закреплённого Network archive через собственный `bin/fetch-native`
    с проверкой SHA256.
 3. Сборку `tests` и интеграционные specs с NATS и готовым Network.
-4. Сборку `deploy` и экспорт точного image ID, receipt и SHA256SUMS.
+4. Сборку `deploy` и экспорт образа, его точного image ID и SHA256SUMS для следующего job.
 
 Сборка Core/Network из исходников и Server fixtures других репозиториев не
 нужны. Ошибка тестов останавливает дальнейшую сборку и экспорт. Сценарий
@@ -125,10 +125,25 @@ service вне payload cgroup; это отдельная граница, не wh
 
 ## Готовый Server image
 
-После own qualification trusted main workflow экспортирует product image и
-публикует immutable `server-v8.0.1-<FULL40SHA>` без registry. PR только проверяет
-и сохраняет job artifact. Публичный [image/receipt contract](interoperability.md)
-задаёт assets, pin/проверки и separate integration.
+После qualification trusted main workflow публикует тот же product image в
+`ghcr.io/skvoz-project/skvoz-server` с тегами `sha-<FULL40SHA>` и `latest`.
+Publisher получает проверенный архив и image ID из Actions artifact, проверяет
+`SHA256SUMS`, выполняет `docker load`, затем `docker tag`/`docker push` без сборки.
+Для GHCR используется штатный `GITHUB_TOKEN` с `packages: write`; pull request
+не публикует образ. Метка `org.opencontainers.image.source` связывает пакет
+с репозиторием Server.
+
+Основной [Compose](../compose.yaml) получает готовый образ из GHCR. Тег `latest`
+следует успешным сборкам `main`, `sha-<FULL40SHA>` выбирает исходный commit;
+для фиксации точного содержимого укажите registry digest `@sha256:<digest>`.
+При первой публикации GHCR создаёт пакет с видимостью Private. Для анонимного
+`docker pull` выберите Public в настройках пакета, как описано в
+[документации GitHub](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
+
+Отдельные [проверки совместимости](interoperability.md) используют готовый образ
+из GHCR по закреплённому digest. Архив служит только для передачи между CI jobs
+и явного локального экспорта; в GitHub Releases он не публикуется. PR выполняет
+проверки и сохраняет Actions artifact без публикации в GHCR.
 
 ```sh
 bash bin/build-local deploy <NEW_OUTPUT_DIRECTORY>
@@ -140,13 +155,9 @@ image. При заданном revision он также проверяет clean
 `gzip -n` на runner. Локальный `bin/build-local` передаёт pinned BuildKit и
 проверяемый writable `/output` mapping; в этом режиме сжатие выполняет BusyBox
 в ограниченном container. Host Docker save/load остаётся вне payload cgroup.
-Receipt и SHA256SUMS описывают готовые bytes. Повторный output не заменяется;
-локальный candidate без `--revision` имеет `source.revision:null,tag:null` и
-не публикуется как release.
-`gzip` metadata детерминированы, но это не обещает равенство independently rebuilt
+В output находятся `server-image.tar.gz`, `image-id` и `SHA256SUMS`; checksum
+покрывает архив и ID. Это внутренний формат передачи проверенного образа, а не
+контракт зависимости клиентских репозиториев. Повторный output не заменяется.
+`gzip` metadata детерминированы, но это не обещает равенства independently rebuilt
 Docker archive/layers. Image ID, source scope и selected dependency lock
 сохраняются отдельно; результат старого image не переносится на новую сборку.
-Publisher проверяет actual clean owning HEAD, receipt/source/checksums и доказанное
-отсутствие release/tag, создаёт tag для owning SHA перед release с `--verify-tag`,
-не двигает latest и не overwrites/deletes существующие assets/tags. Неуспех после
-создания tag требует проверки оператором; автоматического rollback нет.

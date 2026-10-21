@@ -1,6 +1,6 @@
 # Серверный коннектор SKVOZ
 
-`skvoz-server` 8.0.1 управляет TLS, NATS, учётными данными, выделением устройств
+`skvoz-server` 9.0.0 управляет TLS, NATS, учётными данными, выделением устройств
 и процессами. TCP-сокеты назначения, IPv4/IPv6, очередь пакетов и общий
 сетевой контракт обслуживает Rust `skvoz-network-runtime` 0.7.0 с тем же
 универсальным Core 5.0.0. Ruby передаёт только управляющие записи local API1;
@@ -37,8 +37,9 @@ IPv6 требует явно заданного routed `/64`, реальной �
 семейства и не использует helper/TUN. Публикуемые оператором дополнительные
 адреса и management endpoints должны присутствовать в доверенной конфигурации.
 
-Основной путь доставки — push поставщика → GitHub Actions → immutable GitHub
-Release → Actions потребителя с exact URL/SHA256. Server закрепляет
+Зависимости приходят из immutable GitHub Releases поставщиков с exact URL/SHA256.
+Готовый Docker-образ Server публикуется в `ghcr.io/skvoz-project/skvoz-server`.
+Server закрепляет
 [готовый Network bundle](docs/artifacts.md) с Core, затем обычный push в main
 проверяет этот выпуск, собирает и публикует готовый продуктовый image Server.
 Компиляция Core/Network выполняется отдельно в их репозиториях. Digest,
@@ -48,20 +49,23 @@ target, ABI и install closure проверяются до установки. �
 GitHub Actions запускает `bash bin/ci`: собирает Docker targets, выполняет Ruby
 и интеграционные тесты, затем экспортирует продуктовый образ. Для этого не нужны
 доступ к физическому диску runner или специальные проверки cgroup. Следующий
-job публикует образ и контрольные суммы в GitHub Releases.
+job загружает тот же проверенный образ в GHCR с тегами `sha-<полный commit>` и
+`latest`. Обычный запуск использует `docker pull` и готовый [Compose](compose.yaml).
+Отдельные [проверки совместимости](docs/interoperability.md) получают этот же
+образ из GHCR по явно закреплённому registry digest.
 
 Для локальной сборки с ограничением нагрузки используется отдельная команда:
 
 ```sh
 bash bin/build-local deploy artifacts/server-image/local
-docker image tag skvoz-server:ci-deploy skvoz-server:8.0.1
+docker image tag skvoz-server:ci-deploy skvoz-server:9.0.0
 ```
 
 Локальный сценарий требует Linux с Docker и полной видимостью host cgroup v2.
 Он подготавливает ограниченный BuildKit, проверяет реальные лимиты и удаляет
 свои временные containers/cache. Подробности — в [инструкции](docs/artifacts.md#локальная-сборка-с-ограничениями).
-Compose использует локальный образ с `pull_policy: never`; registry-образ для
-сборки и публикации архива не требуется.
+Основной Compose использует GHCR и `pull_policy: missing`. Для локальной сборки
+предназначен overlay `compose.source.yaml` с локальным тегом и `pull_policy: never`.
 [Проверки](docs/server-connector.md#регрессионные-проверки) запускаются напрямую
 через RSpec; [отдельная совместимость клиентов](docs/interoperability.md) использует
 готовый продуктовый image и существующее локальное администрирование.

@@ -1,6 +1,6 @@
 # Серверный коннектор
 
-`skvoz-server` 8.0.1 — Ruby 4.0.7 host общего сетевого runtime: он управляет
+`skvoz-server` 9.0.0 — Ruby 4.0.7 host общего сетевого runtime: он управляет
 NATS 2.15.1, пользователями, устройствами, Auth Callout и TLS.
 TCP-сокеты и полные IP-пакеты обслуживает `skvoz-network-runtime` 0.7.0,
 встраивающий Core 5.0.0 (network 6, API 1).
@@ -60,8 +60,8 @@ sudo install -m 0600 compose.yaml /etc/skvoz/compose.yaml
 ```yaml
 services:
   server:
-    image: skvoz-server:8.0.1
-    pull_policy: never
+    image: ghcr.io/skvoz-project/skvoz-server:latest
+    pull_policy: missing
     environment:
       SKVOZ_ADVERTISED_PORT: &listen_port "4222"
       SKVOZ_ADDRESS: YOUR_PUBLIC_IP_OR_DNS_NAME
@@ -70,23 +70,22 @@ services:
       SKVOZ_ALLOW: '[]'
 ```
 
-Остальные поля сохраните из шаблона. Подготовьте закреплённый native bundle по
-[инструкции сборки](artifacts.md), затем соберите локальный образ из корня
-репозитория и запустите его:
+Остальные поля сохраните из шаблона. Получите готовый образ из GHCR и запустите его:
 
 ```sh
-sudo docker build --target deploy -t skvoz-server:8.0.1 .
 sudo docker compose -p skvoz -f /etc/skvoz/compose.yaml config --quiet
+sudo docker compose -p skvoz -f /etc/skvoz/compose.yaml pull server
 sudo docker compose -p skvoz -f /etc/skvoz/compose.yaml up -d
 sudo docker compose -p skvoz -f /etc/skvoz/compose.yaml exec -T --user 10001 server skvoz-server health
 ```
 
-Шаблон использует локальный `skvoz-server:8.0.1` и `pull_policy: never`.
-Образ должен быть собран заранее; опубликованный registry-образ по умолчанию
-не предполагается. CI выполняет проверки и не публикует образы. Для собственного
-registry укажите реально опубликованный тег или immutable digest и задайте
-`pull_policy: missing`. Доступ к registry должен разрешать серверу загрузку.
-Digest фиксирует точное содержимое образа.
+Шаблон использует `ghcr.io/skvoz-project/skvoz-server:latest` и `pull_policy: missing`.
+CI публикует проверенный образ после успешного push или ручного запуска из `main`.
+Тег `sha-<полный commit>` выбирает конкретный исходный commit; registry digest
+`ghcr.io/skvoz-project/skvoz-server@sha256:<digest>` фиксирует точное содержимое.
+Core/Network и Ruby локально собирать не требуется. При первой публикации пакет
+нужно сделать Public для анонимной загрузки; условия GHCR описаны в
+[руководстве поставки](artifacts.md#готовый-server-image).
 
 В образ входят Ruby, библиотеки с зафиксированными версиями, общий runtime,
 helper и брокер. Том `state` хранит пользователей, назначенные идентификаторы,
@@ -134,9 +133,10 @@ SKVOZ_NETWORK: '{"ipv4":{"pool":"10.204.0.0/16","egress":"nat44","interface":"et
 
 Этап `base` содержит gems и Ruby-код; `tests` добавляет RSpec, готовые native
 бинарники, NATS и локальный ACME Pebble; `deploy` — итоговый образ сервера.
-CI собирает Ruby-only target и запускает его проверки; отдельный native job
-добавляет проверки настоящего сервера. Compose запускается отдельно.
-Автоматической публикации образов нет.
+CI последовательно собирает Ruby-only и native test targets, выполняет их
+проверки и упаковывает `deploy`. Compose-сценарий запускается отдельно.
+Локальная сборка не публикует образ; GitHub Actions этого репозитория публикует проверенный
+deploy image в GHCR после успешного запуска `main`.
 Ruby уже входит в базовый образ. Для сборки нужны Docker/Compose и выбранный
 bundle; отдельные Rust/Python toolchains не требуются.
 
@@ -246,7 +246,7 @@ startup security fence. Старые входы должны быть остан
 `auto-update-disable.sh` выключает их. Для этого нужны Bash, systemd,
 Docker/Compose и права root. На одной машине поддерживается один такой таймер
 для одного развёртывания SKVOZ. Это дополнение к запуску готового образа из
-registry; локальные образы `skvoz-server:8.0.1` и `skvoz-server:source`
+GHCR; локальные образы `skvoz-server:9.0.0` и `skvoz-server:source`
 обновляются отдельной сборкой.
 
 Используйте тот же настроенный YAML, с которым сервер уже запущен.
@@ -255,7 +255,7 @@ Compose в один приватный YAML, проверьте его и пер
 Стандартные NATS входы обслуживаются собственными systemd units из `deploy/nats/`.
 
 Для отслеживания новых сборок укажите в поле `image` изменяемый тег
-собственного опубликованного registry-образа и задайте `pull_policy: missing`.
+`ghcr.io/skvoz-project/skvoz-server:latest` и задайте `pull_policy: missing`.
 Digest и уникальный тег
 версии или commit не переключают сервер на следующий выпуск. Доступ к закрытому
 registry настраивается через `sudo docker login`: фоновые команды запускаются
@@ -620,7 +620,7 @@ stderr дочерних процессов, credentials или пользова�
 
 Брокер, runtime, enrollment и probes используют
 [общий профиль транспорта](https://github.com/skvoz-project/skvoz-core/blob/main/docs/nats-runtime.md#профиль-транспорта).
-Сервер8.0.1 требует enrollment4, network6, API1, runtime0.7.0/helper0.6.0
+Сервер9.0.0 требует enrollment4, network6, API1, runtime0.7.0/helper0.6.0
 и Core5.0.0. Конфигурация —5, persistent state —3, startup —3; Core wire2
 и ABI1 сохраняются. Постоянных legacy wire/config fallbacks нет.
 Ограниченная offline конвертация authority state2 описана выше; runtime

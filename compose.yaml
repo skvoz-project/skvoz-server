@@ -1,8 +1,8 @@
 services:
   server:
     # Replace the address and email before starting the server.
-    image: skvoz-server:8.0.1
-    pull_policy: never
+    image: ghcr.io/skvoz-project/skvoz-server:latest
+    pull_policy: missing
     restart: unless-stopped
     environment:
       SKVOZ_ADVERTISED_PORT: &listen_port "4222"

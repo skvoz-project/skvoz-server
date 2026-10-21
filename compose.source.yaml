@@ -1,6 +1,7 @@
 services:
   server:
     image: skvoz-server:source
+    pull_policy: never
     build:
       context: .
       dockerfile: Dockerfile

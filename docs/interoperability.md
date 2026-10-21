@@ -8,39 +8,25 @@ Server, собственным клиентом и его производств
 
 ## Готовый продукт
 
-Server8.0.1 публикует Linux x86_64 image в immutable GitHub Release:
+Server публикуется в `ghcr.io/skvoz-project/skvoz-server`. Для отдельной
+проверки выберите реально опубликованный образ и закрепите его registry digest:
 
-- tag `server-v8.0.1-<FULL40SHA>` с реальным owning commit Server;
-- `skvoz-server-8.0.1-x86_64-unknown-linux-gnu.docker.tar.gz`;
-- `SHA256SUMS`;
-- `server-image.json`.
-
-Receipt `server-image.json` имеет точные поля:
-
-```json
-{
-  "schema": 1,
-  "component": "skvoz-server",
-  "version": "8.0.1",
-  "target": "x86_64-unknown-linux-gnu",
-  "source": {
-    "repository": "https://github.com/skvoz-project/skvoz-server",
-    "revision": "<FULL40SHA>"
-  },
-  "image_id": "sha256:<64 lowercase hexadecimal digits>",
-  "tag": "server-v8.0.1-<FULL40SHA>"
-}
+```sh
+SERVER_IMAGE='ghcr.io/skvoz-project/skvoz-server@sha256:<64 lowercase hexadecimal digits>'
+docker pull --platform linux/amd64 "$SERVER_IMAGE"
 ```
 
-Потребитель явно закрепляет точный release, SHA256 archive и receipt, image ID
-и source identity. Он проверяет metadata и checksum до `docker image load`,
-после загрузки — точный image ID, Linux/amd64 и image labels
-`org.opencontainers.image.source`, `org.opencontainers.image.version`,
-`org.opencontainers.image.revision`. Запуск использует image ID; mutable tag,
-`latest`, короткий SHA и source rebuild fallback не допускаются. Образ содержит
-NATS, Ruby, locked gems и готовый Network/Core; отдельная установка Server
-зависимостей на стороне клиента не нужна. Новый pin создаётся после реального
-выпуска, а не по предполагаемому будущему digest.
+Этот же digest используется при запуске контейнера. Docker проверяет содержимое
+по digest; контроллер проверяет платформу Linux/amd64. Теги `latest` и
+`sha-<commit>` помогают выбрать выпуск, но вход сценария — точный `@sha256:`.
+Registry digest отличается от локального image ID. Отдельные архив, receipt и
+контрольные суммы из GitHub Releases для этого маршрута не требуются.
+
+Образ содержит NATS, Ruby, locked gems и готовый Network/Core; отдельная
+установка Server зависимостей на стороне клиента не нужна. Новый pin получают
+после реальной публикации в GHCR. Ошибка pull завершает сценарий до создания
+контейнеров и состояния; подмена тегом или сборка Server из исходников не
+выполняются. Подробности поставки — в [руководстве](artifacts.md#готовый-server-image).
 
 ## Запуск и ресурсы
 

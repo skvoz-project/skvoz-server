@@ -59,7 +59,7 @@ CMD ["bundle", "exec", "rspec", "spec"]
 FROM ruby:4.0.7-slim-bookworm@sha256:b21bc6c2360f7b7b615ff8860f239b12b2c6634ec026712745743b0661ac14b9 AS deploy
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.source="https://github.com/skvoz-project/skvoz-server" \
-    org.opencontainers.image.version="8.0.1" \
+    org.opencontainers.image.version="9.0.0" \
     org.opencontainers.image.revision="${SOURCE_REVISION}"
 RUN apt-get update && apt-get install -y --no-install-recommends util-linux ca-certificates iproute2 nftables conntrack libsodium23=1.0.18-1+deb12u1 \
     && rm -rf /var/lib/apt/lists/* \

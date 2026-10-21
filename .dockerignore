@@ -11,10 +11,8 @@
 !bin/fetch-native
 !bin/pin-network-release
 !bin/export-image
-!bin/publish-image
 !bin/support/
 !bin/support/network_download.rb
-!bin/support/server_image.rb
 !bin/build-image
 !bin/ci
 !lib/
