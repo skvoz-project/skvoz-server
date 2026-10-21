@@ -13,7 +13,7 @@
     "network_abi": 1
   },
   "artifact": {
-    "url": "https://github.com/skvoz-project/skvoz-network/releases/download/network-v0.7.0-675aeff79f922b10a6ae6defe463b674ce15ece4/skvoz-network-0.7.0-x86_64-unknown-linux-gnu.tar.gz",
-    "sha256": "5fffc5b5ca5c7992dfe0a612ae941d17e0c8c2e469f41f8149c74ff9f9ce1e32"
+    "url": "https://github.com/skvoz-project/skvoz-network/releases/download/network-v0.7.0-626dc12bf0d1bec5827182fad0ff7d7841f85296/skvoz-network-0.7.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "653d2235d5db89ab6a9e031f539b37f7ddf74aea7d779100bb4e9af316aeba42"
   }
 }
